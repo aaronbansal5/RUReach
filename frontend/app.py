@@ -15,15 +15,19 @@ GOOGLE_CLIENT_SECRETS_PATH = os.getenv("GOOGLE_CLIENT_SECRETS_PATH", "google_cli
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "openid",
-    "email",
-    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
 st.set_page_config(page_title="Rutgers Research Finder", layout="wide")
-st.title("Rutgers Research Finder")
-st.caption("Discover professors, compose outreach, and track progress — all in one place.")
 
-tab1, tab2, tab3 = st.tabs(["🔎 Discover", "✉️ Outreach", "📊 Tracker"])
+# -------------------- Helpers --------------------
+def safe_rerun():
+    # Works on both new and older Streamlit versions
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
 
 # -------------------- Backend helpers --------------------
 def api_get_professors(q: str = "", limit: int = 50):
@@ -57,10 +61,10 @@ def api_send_email(payload: dict):
 # -------------------- Google Sign-In helpers --------------------
 def do_google_login():
     """
-    Desktop OAuth flow for local dev:
-    - Opens browser to Google's consent screen
-    - Receives callback on a local loopback port
-    - Returns access_token AND refresh_token
+    Desktop OAuth flow for local dev with safer settings:
+    - fixed localhost port (8765)
+    - trailing slash on redirect
+    - console fallback if the local server callback fails
     """
     if not os.path.exists(GOOGLE_CLIENT_SECRETS_PATH):
         st.error(
@@ -72,15 +76,27 @@ def do_google_login():
     flow = InstalledAppFlow.from_client_secrets_file(
         GOOGLE_CLIENT_SECRETS_PATH, scopes=SCOPES
     )
-    creds = flow.run_local_server(
-        port=0,
-        access_type="offline",     # ensure refresh_token
-        prompt="consent",          # force consent so refresh_token is issued
-        authorization_prompt_message="",
-        success_message="Login complete. You can close this tab and return to the app."
-    )
 
-    # Cache tokens in session
+    try:
+        creds = flow.run_local_server(
+            host="localhost",
+            port=8765,                        # fixed port helps with firewall
+            access_type="offline",            # get refresh_token
+            prompt="consent",                 # force consent, ensures refresh_token
+            authorization_prompt_message="",
+            success_message="Login complete. You can close this tab and return to the app.",
+            open_browser=True,
+            redirect_uri_trailing_slash=True,
+        )
+    except Exception as e:
+        st.warning(f"Local callback failed ({e}). Falling back to console login in your terminal window.")
+        try:
+            creds = flow.run_console(authorization_prompt_message="")
+        except Exception as e2:
+            st.error(f"Google sign-in failed: {e2}")
+            return False
+
+    # Cache tokens in session (used later to send emails)
     st.session_state.google_creds = {
         "token": creds.token,
         "refresh_token": creds.refresh_token,
@@ -92,39 +108,65 @@ def do_google_login():
         "id_token": getattr(creds, "id_token", None),
     }
 
-    # Fetch basic profile (email, name) for UI
+    # Fetch user profile via OIDC userinfo
     try:
         resp = requests.get(
-            "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
+            "https://openidconnect.googleapis.com/v1/userinfo",
             headers={"Authorization": f"Bearer {creds.token}"},
             timeout=20,
         )
         if resp.ok:
-            st.session_state.google_user = resp.json()  # {"email": "...", "name": "...", "picture": "..."}
+            st.session_state.google_user = resp.json()  # {"sub","email","name","picture",...}
+            # Stable account id (sub) is a good UID; fallback to email if missing
+            st.session_state.user_uid = st.session_state.google_user.get("sub") or st.session_state.google_user.get("email")
     except Exception:
         pass
 
     return True
 
 def require_google_login_ui():
-    signed_in = ("google_creds" in st.session_state) and st.session_state.google_creds.get("token")
+    signed_in = ("google_creds" in st.session_state) and bool(st.session_state.google_creds.get("token"))
     if not signed_in:
-        st.info("Sign in with Google to send emails via your account.")
+        st.header("Sign in with Google")
+        st.write("Please sign in to continue. We use your Google account to send outreach emails via Gmail on your behalf.")
         if st.button("Sign in with Google"):
             if do_google_login():
-                st.experimental_rerun()
-    return ("google_creds" in st.session_state) and st.session_state.google_creds.get("token")
+                # Rerun so the page rebuilds with the signed-in state
+                safe_rerun()
+    return ("google_creds" in st.session_state) and bool(st.session_state.google_creds.get("token"))
 
 def sign_out():
-    for k in ("google_creds", "google_user"):
+    for k in ("google_creds", "google_user", "user_uid"):
         if k in st.session_state:
             del st.session_state[k]
     st.success("Signed out.")
-    st.experimental_rerun()
+    safe_rerun()
 
 # -------------------- Session state --------------------
 if "outreach_queue" not in st.session_state:
     st.session_state.outreach_queue = []  # store professor doc IDs
+
+# -------------------- Global login gate (FIRST) --------------------
+if not require_google_login_ui():
+    st.stop()
+
+# If we get here, user is signed in
+user_email = (st.session_state.get("google_user") or {}).get("email") or "Unknown"
+user_uid = st.session_state.get("user_uid") or user_email  # stable ID we can log with
+
+# Sidebar chip
+with st.sidebar:
+    st.markdown("### Account")
+    st.success(f"Signed in: {user_email}")
+    st.caption(f"UID: {user_uid}")
+    if st.button("Sign out"):
+        sign_out()
+
+# -------------------- App content --------------------
+st.title("Rutgers Research Finder")
+st.caption("Discover professors, compose outreach, and track progress — all in one place.")
+
+tab1, tab2, tab3 = st.tabs(["🔎 Discover", "✉️ Outreach", "📊 Tracker"])
 
 # -------------------- Discover tab --------------------
 with tab1:
@@ -169,7 +211,7 @@ with tab1:
                 "name": p.get("name"),
                 "institution": p.get("institution"),
                 "topics": ", ".join(p.get("topics", [])[:6]),
-                "summary": (p.get("research_summary") or "")[:160] + ("..." if p.get("research_summary") and len(p.get("research_summary")) > 160 else ""),
+                "summary": (p.get("research_summary") or "")[:160] + ("..." if p.get("research_summary") and len(p.get("research_summary") > 160) else ""),
                 "website": p.get("website")
             } for p in profs])
             st.dataframe(df2, use_container_width=True)
@@ -179,25 +221,12 @@ with tab1:
 # -------------------- Outreach tab --------------------
 with tab2:
     st.subheader("Compose & Send Outreach")
-
-    # Google login / user chip
-    if require_google_login_ui():
-        user_email = (st.session_state.get("google_user") or {}).get("email") or "Unknown"
-        cols = st.columns([1, 1, 6])
-        with cols[0]:
-            st.success(f"Signed in: {user_email}")
-        with cols[1]:
-            if st.button("Sign out"):
-                sign_out()
-    else:
-        st.stop()  # render only login prompt until signed in
-
-    st.write("Queue:", st.session_state.outreach_queue or "Empty")
+    st.write("Queue:", st.session_state.get("outreach_queue") or "Empty")
 
     with st.form("outreach_form"):
         recipients_csv = st.text_input(
             "Professor doc IDs (comma-separated)",
-            value=",".join(st.session_state.outreach_queue)
+            value=",".join(st.session_state.get("outreach_queue", []))
         )
         subject = st.text_input("Subject", value="Prospective undergraduate researcher")
         body = st.text_area("Body (plain text)", height=220, value=(
@@ -208,15 +237,15 @@ with tab2:
             "Best,\nYOUR_NAME\nYOUR_EMAIL"
         ))
 
-        # (Optional) file uploads — next step is uploading to Firebase Storage and passing signed URLs
+        # Optional file uploads: if you add a /send-email-direct endpoint later
         colA, colB = st.columns(2)
         with colA:
             resume_file = st.file_uploader("Attach Resume (PDF)", type=["pdf"])
         with colB:
             transcript_file = st.file_uploader("Attach Transcript (PDF, optional)", type=["pdf"])
 
-        # For logging: use email as a stand-in student id for now
-        student_uid = st.text_input("Your student ID/UID (for logging)", value=user_email)
+        # Use the Google UID/email as the student id for logging for now
+        student_uid = st.text_input("Your student ID/UID (for logging)", value=user_uid)
 
         submitted = st.form_submit_button("Send emails")
 
@@ -234,8 +263,8 @@ with tab2:
             "body_markdown": body,
             "student_uid": student_uid,
             "access_token": access_token,
-            "refresh_token": refresh_token,  # let backend refresh when needed
-            "resume_url": None,              # TODO: upload to Firebase Storage and add signed URL
+            "refresh_token": refresh_token,  # lets backend refresh when needed
+            "resume_url": None,
             "transcript_url": None
         }
         res = api_send_email(payload)
