@@ -10,7 +10,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 # -------------------- Config --------------------
 load_dotenv()
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
-GOOGLE_CLIENT_SECRETS_PATH = os.getenv("GOOGLE_CLIENT_SECRETS_PATH", "google_client_secret.json")
+GOOGLE_CLIENT_SECRETS_PATH = os.getenv("GOOGLE_CLIENT_SECRETS_PATH", "creds/google_client_secret.json")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",

@@ -1,0 +1,6 @@
+data/venv
+data/firebase-admin.json
+data/.env
+google_client_secret.json
+.env
+venv
