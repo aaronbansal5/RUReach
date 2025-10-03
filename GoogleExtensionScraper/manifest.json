@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Rutgers Name Extractor",
+  "version": "1.0",
+  "description": "Extracts professor names from the first page of researchwithrutgers.com/en/persons.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.researchwithrutgers.com/en/persons*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "scripting",
+    "clipboardWrite"
+  ]
+}
